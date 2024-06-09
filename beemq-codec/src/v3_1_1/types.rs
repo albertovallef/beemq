@@ -9,12 +9,6 @@ pub struct FixedHeader {
 
 pub struct FixedHeaderCodec;
 
-impl FixedHeaderCodec {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 impl Decoder for FixedHeaderCodec {
     type Item = FixedHeader;
     type Error = io::Error;
@@ -97,54 +91,79 @@ pub struct ConnectPacket {
 
 pub struct ConnectCodec;
 
+impl ConnectCodec {
+    fn get_bytes_len(&mut self, msb: u8, lsb: u8) -> usize {
+        // Get the number of bytes to read from byte sequence
+        // given MSB and LSB
+        let byte_len = ((msb as usize) << 8) | (lsb as usize);
+        byte_len
+    }
+}
+
 impl Decoder for ConnectCodec {
     type Item = ConnectPacket;
     type Error = io::Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // TODO: Investigate what to do with these 2 bytes
+        // 3.1.2 Variable header
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        // Section 3.1.2.1
-        let protocl_name_bytes = &buf[..4];
-        // TODO: Return error if protocol name is incorrect
-        let protocol_name = String::from_utf8(protocl_name_bytes.to_vec()).unwrap();
+
+        // 3.1.2.1 Protocol Name
+        let protocl_name_bytes = &buf[..byte_len];
+        let protocol_name = match String::from_utf8(protocl_name_bytes.to_vec()) {
+            Ok(s) => s.to_string(),
+            Err(_e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid UTF-8 sequence",
+                ))
+            }
+        };
 
         if protocol_name != "MQTT" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Incorrect protocol name",
+                "Invalid protocol name",
             ));
         }
 
-        buf.advance(4);
-        // Section 3.1.2.2
-        let protocol_level = buf[0];
-        match protocol_level {
-            0x04 => (),
+        buf.advance(byte_len);
+
+        // 3.1.2.2 Protocol Level
+        let protocol_level = match buf[0] {
+            0x04 => buf[0],
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Incorrect protocol level",
+                    "Invalid protocol level",
                 ))
             }
         };
         buf.advance(1);
 
+        // 3.1.2.3 Connect Flags
         let connect_flags = buf[0];
-        // Reserved bit must be zero or error
+        // Reserved is unused and must be zero
         let reserved = (connect_flags & 0b00000001) != 0;
         if reserved != false {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Violated reserved bit state",
+                "Violated reserved bit zero state",
             ));
         }
         let clean_session = (connect_flags & 0b00000010) != 0;
         let will_flag = (connect_flags & 0b00000100) != 0;
 
-        let will_qos_bit_1 = (connect_flags & 0b00001000) >> 3;
-        let will_qos_bit_2 = (connect_flags & 0b00010000) >> 4;
-        let will_qos = (will_qos_bit_2 << 1) | will_qos_bit_1;
+        let will_qos_lsb = (connect_flags & 0b00001000) >> 3;
+        let will_qos_msb = (connect_flags & 0b00010000) >> 4;
+        let will_qos = (will_qos_msb << 1) | will_qos_lsb;
+        if will_qos > 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid will qos, greater than 2",
+            ));
+        }
 
         let will_retain = (connect_flags & 0b00100000) != 0;
         let password_flag = (connect_flags & 0b01000000) != 0;
@@ -160,7 +179,7 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(1);
 
-        // Section 3.1.2.10
+        // 3.1.2.10 Keep Alive
         let keep_alive_msb = buf[0];
         let keep_alive_lsb = buf[1];
         // TODO: Must not exceed 18hrs 12 mins and 15 sec
@@ -174,46 +193,66 @@ impl Decoder for ConnectCodec {
         buf.advance(2);
 
         // 3.1.3 Payload
-        let client_id_msb = buf[0];
-        let client_id_lsb = buf[1];
-        // TODO: Must not exceed 18hrs 12 mins and 15 sec
-        let client_id_bit_len = ((client_id_msb as usize) << 8) | (client_id_lsb as usize);
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        let client_id_bytes = &buf[..client_id_bit_len];
-        let client_id = String::from_utf8(client_id_bytes.to_vec()).unwrap();
-        buf.advance(client_id_bit_len as usize);
+        let client_id_bytes = &buf[..byte_len];
+        let client_id = match String::from_utf8(client_id_bytes.to_vec()) {
+            Ok(s) => s,
+            Err(_e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Client id is not UTF-8 encoded",
+                ))
+            }
+        };
+        buf.advance(byte_len);
 
-        let will_topic_msb = buf[0];
-        let will_topic_lsb = buf[1];
-        // TODO: Must not exceed 18hrs 12 mins and 15 sec
-        let will_topic_bit_len = ((will_topic_msb as usize) << 8) | (will_topic_lsb as usize);
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        let will_topic_bytes = &buf[..will_topic_bit_len];
-        let will_topic = Some(String::from_utf8(will_topic_bytes.to_vec()).unwrap());
-        buf.advance(will_topic_bit_len);
+        let will_topic_bytes = &buf[..byte_len];
+        let will_topic = match String::from_utf8(will_topic_bytes.to_vec()) {
+            Ok(s) => Some(s),
+            Err(_e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Will topic is not UTF-8 encoded",
+                ))
+            }
+        };
+        buf.advance(byte_len);
 
-        let will_message_msb = buf[0];
-        let will_message_lsb = buf[1];
-        let will_message_bit_len = ((will_message_msb as usize) << 8) | (will_message_lsb as usize);
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        let will_message = Some(&buf[..will_message_bit_len].to_vec()).cloned();
-        buf.advance(will_message_bit_len);
+        let will_message = Some(&buf[..byte_len].to_vec()).cloned();
+        buf.advance(byte_len);
 
-        let username_msb = buf[0];
-        let username_lsb = buf[1];
-        let username_bit_len = ((username_msb as usize) << 8) | (username_lsb as usize);
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        let username_bytes = &buf[..username_bit_len];
-        let username = Some(String::from_utf8(username_bytes.to_vec()).unwrap());
-        buf.advance(username_bit_len);
+        let username_bytes = &buf[..byte_len];
+        let username = match String::from_utf8(username_bytes.to_vec()) {
+            Ok(s) => Some(s),
+            Err(_e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Username is not UTF-8 encoded",
+                ))
+            }
+        };
+        buf.advance(byte_len);
 
-        let password_msb = buf[0];
-        let password_lsb = buf[1];
-        let password_bit_len = ((password_msb as usize) << 8) | (password_lsb as usize);
+        let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
-        let password_bytes = &buf[..password_bit_len];
-        let password = Some(String::from_utf8(password_bytes.to_vec()).unwrap());
-        buf.advance(password_bit_len);
+        let password_bytes = &buf[..byte_len];
+        let password = match String::from_utf8(password_bytes.to_vec()) {
+            Ok(s) => Some(s),
+            Err(_e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Password is not UTF-8 encoded",
+                ))
+            }
+        };
+        buf.advance(byte_len);
 
         let payload = ConnectPayload {
             client_id,
@@ -222,6 +261,7 @@ impl Decoder for ConnectCodec {
             username,
             password,
         };
+
         Ok(Some(ConnectPacket {
             variable_header,
             payload,
@@ -248,9 +288,7 @@ impl Decoder for MqttCodec {
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // Read leading 4 bits to get packet type
-        let mut fh_codec = FixedHeaderCodec::new();
-
-        let fixed_header = fh_codec.decode(buf)?;
+        let fixed_header = FixedHeaderCodec.decode(buf)?;
 
         let fixed_header = match fixed_header {
             Some(header) => header,
@@ -260,8 +298,7 @@ impl Decoder for MqttCodec {
         if buf.len() < (1 + fixed_header.remaining_length).try_into().unwrap() {
             Ok(None)
         } else {
-            buf.advance(1);
-            buf.advance(1);
+            buf.advance(2);
 
             let packet = match fixed_header.packet_type {
                 1 => ConnectCodec.decode(buf).unwrap(),
@@ -280,22 +317,6 @@ impl Decoder for MqttCodec {
 
             Ok(Some(packet))
         }
-
-        //// Skip fixed header bytes
-        //if buf.len() < (1 + fixed_header.remaining_length).try_into().unwrap() {
-        // Ok(None)
-        //}
-        //
-        //buf.advance(1);
-        //buf.advance(1);
-
-        // let packet = match fixed_header.packet_type {
-        //     1 => ConnectDecoder.decode(buf),
-        //     _ => Err(io::Error::new(
-        //         io::ErrorKind::InvalidData,
-        //         "Unknown packet type",
-        //     )),
-        // };
     }
 }
 #[cfg(test)]
@@ -327,29 +348,9 @@ mod tests {
         let mut codec = MqttCodec::new();
         let connect = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(connect.variable_header.protocol_name, String::from("MQTT"));
-
-        //assert_eq!(
-        //    packet,
-        //    MqttPacket::Connect(ConnectPacket {
-        //        fixed_header: FixedHeader {
-        //            packet_type: 1,
-        //            flags: 2,
-        //            remaining_length: 2,
-        //        },
-        //        variable_header: ConnectVariable {
-        //            protocol_name: "MQTT".to_string(),
-        //            protocol_level: 4,
-        //            connect_flags: 2,
-        //            keep_alive: 60,
-        //        },
-        //        payload: ConnectPayload {
-        //            client_id: "Alberto".to_string(),
-        //            will_topic: "api/v1".to_string(),
-        //            will_message: 2,
-        //            user_name: "Alberto".to_string(),
-        //            password: "pass".to_string(),
-        //        }
-        //    })
-        //);
+        assert_eq!(
+            connect.payload.will_topic.unwrap(),
+            String::from("will/topic")
+        );
     }
 }
