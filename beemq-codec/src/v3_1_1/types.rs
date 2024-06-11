@@ -23,6 +23,13 @@ impl Decoder for FixedHeaderCodec {
         // The 4 MSG are the "packet type"
         // Use shift-right to skip "reserved" bits
         let packet_type = buf[0] >> 4;
+        if packet_type < 1 || packet_type > 14 {
+            buf.advance(1);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid packet type",
+            ));
+        }
 
         // Remaining length Algorithm. See section 2.2.3
         let mut multiplier: u32 = 1;
