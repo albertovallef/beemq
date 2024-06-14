@@ -1,5 +1,6 @@
 use bytes::{Buf, BytesMut};
-use std::io;
+use std::io::Error;
+use std::io::ErrorKind::InvalidData;
 use tokio_util::codec::Decoder;
 
 pub struct FixedHeader {
@@ -11,7 +12,7 @@ pub struct FixedHeaderCodec;
 
 impl Decoder for FixedHeaderCodec {
     type Item = FixedHeader;
-    type Error = io::Error;
+    type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if buf.len() < 2 {
@@ -24,11 +25,7 @@ impl Decoder for FixedHeaderCodec {
         // Use shift-right to skip "reserved" bits
         let packet_type = buf[0] >> 4;
         if packet_type < 1 || packet_type > 14 {
-            buf.advance(1);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid packet type",
-            ));
+            return Err(Error::new(InvalidData, "Invalid packet type"));
         }
 
         // Remaining length Algorithm. See section 2.2.3
@@ -48,10 +45,7 @@ impl Decoder for FixedHeaderCodec {
             multiplier *= 128;
 
             if multiplier > 128 * 128 * 128 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Malformed remaining length",
-                ));
+                return Err(Error::new(InvalidData, "Malformed remaining length"));
             }
 
             // MSB is the continuation flag
@@ -109,7 +103,7 @@ impl ConnectCodec {
 
 impl Decoder for ConnectCodec {
     type Item = ConnectPacket;
-    type Error = io::Error;
+    type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // 3.1.2 Variable header
@@ -120,19 +114,11 @@ impl Decoder for ConnectCodec {
         let protocl_name_bytes = &buf[..byte_len];
         let protocol_name = match String::from_utf8(protocl_name_bytes.to_vec()) {
             Ok(s) => s.to_string(),
-            Err(_e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid UTF-8 sequence",
-                ))
-            }
+            Err(_e) => return Err(Error::new(InvalidData, "Invalid UTF-8 sequence")),
         };
 
         if protocol_name != "MQTT" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid protocol name",
-            ));
+            return Err(Error::new(InvalidData, "Invalid protocol name"));
         }
 
         buf.advance(byte_len);
@@ -140,12 +126,7 @@ impl Decoder for ConnectCodec {
         // 3.1.2.2 Protocol Level
         let protocol_level = match buf[0] {
             0x04 => buf[0],
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid protocol level",
-                ))
-            }
+            _ => return Err(Error::new(InvalidData, "Invalid protocol level")),
         };
         buf.advance(1);
 
@@ -154,10 +135,7 @@ impl Decoder for ConnectCodec {
         // Reserved is unused and must be zero
         let reserved = (connect_flags & 0b00000001) != 0;
         if reserved != false {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Violated reserved bit zero state",
-            ));
+            return Err(Error::new(InvalidData, "Violated reserved bit zero state"));
         }
         let clean_session = (connect_flags & 0b00000010) != 0;
         let will_flag = (connect_flags & 0b00000100) != 0;
@@ -166,10 +144,7 @@ impl Decoder for ConnectCodec {
         let will_qos_msb = (connect_flags & 0b00010000) >> 4;
         let will_qos = (will_qos_msb << 1) | will_qos_lsb;
         if will_qos > 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid will qos, greater than 2",
-            ));
+            return Err(Error::new(InvalidData, "Invalid will qos, greater than 2"));
         }
 
         let will_retain = (connect_flags & 0b00100000) != 0;
@@ -205,12 +180,7 @@ impl Decoder for ConnectCodec {
         let client_id_bytes = &buf[..byte_len];
         let client_id = match String::from_utf8(client_id_bytes.to_vec()) {
             Ok(s) => s,
-            Err(_e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Client id is not UTF-8 encoded",
-                ))
-            }
+            Err(_e) => return Err(Error::new(InvalidData, "Client id is not UTF-8 encoded")),
         };
         buf.advance(byte_len);
 
@@ -219,12 +189,7 @@ impl Decoder for ConnectCodec {
         let will_topic_bytes = &buf[..byte_len];
         let will_topic = match String::from_utf8(will_topic_bytes.to_vec()) {
             Ok(s) => Some(s),
-            Err(_e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Will topic is not UTF-8 encoded",
-                ))
-            }
+            Err(_e) => return Err(Error::new(InvalidData, "Will topic is not UTF-8 encoded")),
         };
         buf.advance(byte_len);
 
@@ -238,12 +203,7 @@ impl Decoder for ConnectCodec {
         let username_bytes = &buf[..byte_len];
         let username = match String::from_utf8(username_bytes.to_vec()) {
             Ok(s) => Some(s),
-            Err(_e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Username is not UTF-8 encoded",
-                ))
-            }
+            Err(_e) => return Err(Error::new(InvalidData, "Username is not UTF-8 encoded")),
         };
         buf.advance(byte_len);
 
@@ -252,12 +212,7 @@ impl Decoder for ConnectCodec {
         let password_bytes = &buf[..byte_len];
         let password = match String::from_utf8(password_bytes.to_vec()) {
             Ok(s) => Some(s),
-            Err(_e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Password is not UTF-8 encoded",
-                ))
-            }
+            Err(_e) => return Err(Error::new(InvalidData, "Password is not UTF-8 encoded")),
         };
         buf.advance(byte_len);
 
@@ -291,15 +246,16 @@ impl MqttCodec {
 
 impl Decoder for MqttCodec {
     type Item = ConnectPacket;
-    type Error = io::Error;
+    type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // Read leading 4 bits to get packet type
-        let fixed_header = FixedHeaderCodec.decode(buf)?;
-
-        let fixed_header = match fixed_header {
-            Some(header) => header,
-            None => return Ok(None),
+        let fixed_header = match FixedHeaderCodec.decode(buf) {
+            Ok(h) => match h {
+                Some(h) => h,
+                None => return Ok(None),
+            },
+            Err(e) => return Err(Error::new(InvalidData, e)),
         };
 
         if buf.len() < (1 + fixed_header.remaining_length).try_into().unwrap() {
@@ -309,12 +265,7 @@ impl Decoder for MqttCodec {
 
             let packet = match fixed_header.packet_type {
                 1 => ConnectCodec.decode(buf).unwrap(),
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Malformed remaining length",
-                    ))
-                }
+                _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
             };
 
             let packet = match packet {
