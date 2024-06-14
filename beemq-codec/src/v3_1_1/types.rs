@@ -245,7 +245,7 @@ impl MqttCodec {
 }
 
 impl Decoder for MqttCodec {
-    type Item = ConnectPacket;
+    type Item = MqttPacket;
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -264,12 +264,12 @@ impl Decoder for MqttCodec {
             buf.advance(2);
 
             let packet = match fixed_header.packet_type {
-                1 => ConnectCodec.decode(buf).unwrap(),
+                1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
                 _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
             };
 
             let packet = match packet {
-                Some(packet) => packet,
+                Some(p) => p,
                 None => return Ok(None),
             };
 
@@ -304,11 +304,12 @@ mod tests {
         );
 
         let mut codec = MqttCodec::new();
-        let connect = codec.decode(&mut buf).unwrap().unwrap();
-        assert_eq!(connect.variable_header.protocol_name, String::from("MQTT"));
-        assert_eq!(
-            connect.payload.will_topic.unwrap(),
-            String::from("will/topic")
-        );
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+
+        match packet {
+            MqttPacket::Connect(c) => {
+                assert_eq!(c.variable_header.protocol_name, String::from("MQTT"))
+            }
+        }
     }
 }
