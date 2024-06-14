@@ -308,7 +308,16 @@ mod tests {
 
         match packet {
             MqttPacket::Connect(c) => {
-                assert_eq!(c.variable_header.protocol_name, String::from("MQTT"))
+                assert_eq!(c.variable_header.protocol_name, String::from("MQTT"));
+                assert_eq!(c.variable_header.protocol_level, 0x4);
+                assert_eq!(c.variable_header.connect_flags.username_flag, true);
+                assert_eq!(c.variable_header.connect_flags.password_flag, true);
+                assert_eq!(c.variable_header.connect_flags.will_retain, false);
+                assert_eq!(c.variable_header.connect_flags.will_qos, 0);
+                assert_eq!(c.variable_header.connect_flags.clean_session, true);
+                assert_eq!(c.variable_header.keep_alive, 60);
+                assert_eq!(c.variable_header.connect_flags.password_flag, true);
+                assert_eq!(c.payload.client_id, String::from("client123"));
             }
         }
     }
