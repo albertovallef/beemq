@@ -231,9 +231,57 @@ impl Decoder for ConnectCodec {
     }
 }
 
+pub struct ConnackVariable {
+    session_present_flag: bool,
+    connect_return_code: u8,
+}
+
+pub struct ConnackPacket {
+    variable_header: ConnackVariable,
+    // No fixed header
+}
+
+pub struct ConnackCodec;
+
+impl Decoder for ConnackCodec {
+    type Item = ConnackPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // 3.2.2.1 Connect Acknowledge Flags
+        let session_present_byte = buf[0];
+        let mask: u8 = 0b1111_1110;
+        if session_present_byte & mask != 0 {
+            return Err(Error::new(InvalidData, "Bits 7-1 must be zero"));
+        }
+        let session_present_flag = (session_present_byte & 0b00000001) != 0;
+        buf.advance(1);
+
+        // 3.2.2.3 Return Code
+        let connect_return_code = buf[0];
+        let variable_header = ConnackVariable {
+            session_present_flag,
+            connect_return_code,
+        };
+        Ok(Some(ConnackPacket { variable_header }))
+    }
+}
+
 pub enum MqttPacket {
     Connect(ConnectPacket),
-    // Continue adding definitions
+    Connack(ConnackPacket),
+    //Publish(PublishPacket),
+    //Puback(PubackPacket),
+    //Pubrec(PubrecPacket),
+    //Pubrel(PubrelPacket),
+    //Pubcomp(PubcompPacket),
+    //Subscribe(SubscribePacket),
+    //Suback(SubackPacket),
+    //Unsubscribe(UnsubscribePacket),
+    //Unsuback(UnsubackPacket),
+    //Pingreq(PingreqPacket),
+    //Pingresp(PingrespPacket),
+    //Disconnect(DisconnectPacket),
 }
 
 pub struct MqttCodec;
@@ -265,6 +313,7 @@ impl Decoder for MqttCodec {
 
             let packet = match fixed_header.packet_type {
                 1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
+                2 => ConnackCodec.decode(buf)?.map(MqttPacket::Connack),
                 _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
             };
 
@@ -318,7 +367,43 @@ mod tests {
                 assert_eq!(c.variable_header.keep_alive, 60);
                 assert_eq!(c.variable_header.connect_flags.password_flag, true);
                 assert_eq!(c.payload.client_id, String::from("client123"));
+                match c.payload.will_topic {
+                    Some(t) => assert_eq!(t, String::from("will/topic")),
+                    _ => (),
+                }
+                //assert_eq!(c.payload.will_message, String::from("Will Message"));
+                match c.payload.username {
+                    Some(u) => assert_eq!(u, String::from("user")),
+                    _ => (),
+                }
+                match c.payload.password {
+                    Some(p) => assert_eq!(p, String::from("pass")),
+                    _ => (),
+                }
             }
+            _ => (),
+        }
+    }
+
+    #[test]
+    fn test_decode_connack_packet() {
+        let mut buf = BytesMut::from(
+            &[
+                0x20, // Packet type (CONNACK) and flags
+                0x02, // Remaining length
+                0x00, // Connect Acknowledge Flags
+                0x00, // Connect Return Code (0 = Connection Accepted)
+            ][..],
+        );
+
+        let mut codec = MqttCodec::new();
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+        match packet {
+            MqttPacket::Connack(c) => {
+                assert_eq!(c.variable_header.session_present_flag, false);
+                assert_eq!(c.variable_header.connect_return_code, 0);
+            }
+            _ => (),
         }
     }
 }
