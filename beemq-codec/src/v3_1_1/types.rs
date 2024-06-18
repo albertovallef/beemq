@@ -259,6 +259,7 @@ impl Decoder for ConnackCodec {
 
         // 3.2.2.3 Return Code
         let connect_return_code = buf[0];
+        buf.advance(1);
         let variable_header = ConnackVariable {
             session_present_flag,
             connect_return_code,
