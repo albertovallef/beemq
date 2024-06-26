@@ -1,65 +1,9 @@
 use bytes::{Buf, BytesMut};
 use std::io::Error;
 use std::io::ErrorKind::InvalidData;
+use std::u32;
 use tokio_util::codec::Decoder;
 
-pub struct FixedHeader {
-    packet_type: u8,
-    remaining_length: u32,
-}
-
-pub struct FixedHeaderCodec;
-
-impl Decoder for FixedHeaderCodec {
-    type Item = FixedHeader;
-    type Error = Error;
-
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if buf.len() < 2 {
-            // Fixed header is 2 bytes. See section 2.2
-            return Ok(None); // Wait for entire message to arrive
-        }
-
-        // The 4 LSB are "reserved" (unused bits)
-        // The 4 MSG are the "packet type"
-        // Use shift-right to skip "reserved" bits
-        let packet_type = buf[0] >> 4;
-        if packet_type < 1 || packet_type > 14 {
-            return Err(Error::new(InvalidData, "Invalid packet type"));
-        }
-
-        // Remaining length Algorithm. See section 2.2.3
-        let mut multiplier: u32 = 1;
-        let mut remaining_length: u32 = 0;
-        let mut pos = 1; // remaining length start at second byte
-
-        loop {
-            if pos >= buf.len() {
-                return Ok(None); // Not enough data arrived yet
-            }
-
-            let encoded_byte = buf[pos];
-            pos += 1;
-            remaining_length += (encoded_byte & 127) as u32 * multiplier;
-            // Multiply since is the next byte
-            multiplier *= 128;
-
-            if multiplier > 128 * 128 * 128 {
-                return Err(Error::new(InvalidData, "Malformed remaining length"));
-            }
-
-            // MSB is the continuation flag
-            if (encoded_byte & 128) == 0 {
-                break;
-            }
-        }
-
-        Ok(Some(FixedHeader {
-            packet_type,
-            remaining_length,
-        }))
-    }
-}
 pub struct ConnectFlags {
     username_flag: bool,
     password_flag: bool,
@@ -106,6 +50,9 @@ impl Decoder for ConnectCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Moved on from fixed header
+        buf.advance(2);
+
         // 3.1.2 Variable header
         let byte_len = self.get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
@@ -248,6 +195,9 @@ impl Decoder for ConnackCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Moved on from fixed header
+        buf.advance(2);
+
         // 3.2.2.1 Connect Acknowledge Flags
         let session_present_byte = buf[0];
         let mask: u8 = 0b1111_1110;
@@ -268,10 +218,48 @@ impl Decoder for ConnackCodec {
     }
 }
 
+pub struct PublishPayload;
+pub struct PublishVariable;
+pub struct PublishPacket;
+pub struct PublishCodec;
+
+impl Decoder for PublishCodec {
+    type Item = PublishPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // 3.3.1 Fixed header
+        let publish_flags = buf[0];
+        let dup_flag = (publish_flags & 0b00000001) != 0;
+        let retain = (publish_flags & 0b00000010) != 0;
+        let temp_buf = publish_flags << 5;
+        let qos_val = temp_buf >> 6;
+
+        match qos_val {
+            0 => (),
+            1 => (),
+            2 => (),
+            _ => {
+                return Err(Error::new(
+                    InvalidData,
+                    "Publish packet must not have both QoS set to 1",
+                ))
+            }
+        }
+
+        // Moved on from fixed header
+        buf.advance(2);
+
+        // 3.3.2 Variable header
+
+        Ok(None)
+    }
+}
+
 pub enum MqttPacket {
     Connect(ConnectPacket),
     Connack(ConnackPacket),
-    //Publish(PublishPacket),
+    Publish(PublishPacket),
     //Puback(PubackPacket),
     //Pubrec(PubrecPacket),
     //Pubrel(PubrelPacket),
@@ -298,23 +286,56 @@ impl Decoder for MqttCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // Read leading 4 bits to get packet type
-        let fixed_header = match FixedHeaderCodec.decode(buf) {
-            Ok(h) => match h {
-                Some(h) => h,
-                None => return Ok(None),
-            },
-            Err(e) => return Err(Error::new(InvalidData, e)),
-        };
+        // 2.2 Fixed Header
+        if buf.len() < 2 {
+            // Fixed header is 2 bytes. See section 2.2
+            return Ok(None); // Wait for entire message to arrive
+        }
 
-        if buf.len() < (1 + fixed_header.remaining_length).try_into().unwrap() {
+        // The 4 MSB represent the "packet type"
+        // Use shift-right to skip "reserved" bits
+        let packet_type = buf[0] >> 4;
+        if packet_type < 1 || packet_type > 14 {
+            buf.advance(1);
+            return Err(Error::new(InvalidData, "Invalid packet type"));
+        }
+
+        // 2.2.3 Remaining Length
+        let mut multiplier: u32 = 1;
+        let mut remaining_length: u32 = 0;
+        // Remaining length start at second byte
+        let mut pos = 1;
+
+        loop {
+            if pos >= buf.len() {
+                // Not enough data arrived yet to decode
+                return Ok(None);
+            }
+
+            let encoded_byte = buf[pos];
+            pos += 1;
+            remaining_length += (encoded_byte & 127) as u32 * multiplier;
+            // Multiply since is the next byte
+            multiplier *= 128;
+
+            if multiplier > 128 * 128 * 128 {
+                return Err(Error::new(InvalidData, "Malformed remaining length"));
+            }
+
+            // MSB is the continuation flag
+            if (encoded_byte & 128) == 0 {
+                break;
+            }
+        }
+
+        if buf.len() < (1 + remaining_length) as usize {
+            // The entire packet hasn't arrived yet
             Ok(None)
         } else {
-            buf.advance(2);
-
-            let packet = match fixed_header.packet_type {
+            let packet = match packet_type {
                 1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
                 2 => ConnackCodec.decode(buf)?.map(MqttPacket::Connack),
+                3 => PublishCodec.decode(buf)?.map(MqttPacket::Publish),
                 _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
             };
 
@@ -322,11 +343,11 @@ impl Decoder for MqttCodec {
                 Some(p) => p,
                 None => return Ok(None),
             };
-
             Ok(Some(packet))
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
