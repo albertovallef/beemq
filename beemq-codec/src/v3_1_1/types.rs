@@ -242,9 +242,15 @@ impl Decoder for ConnackCodec {
     }
 }
 
-pub struct PublishPayload;
-pub struct PublishVariable;
-pub struct PublishPacket;
+pub struct PublishPacket {
+    dup_flag: bool,
+    retain: bool,
+    qos: u8,
+    topic: String,
+    packet_id: u16,
+    payload: Vec<u8>,
+}
+
 pub struct PublishCodec;
 
 impl Decoder for PublishCodec {
@@ -257,10 +263,22 @@ impl Decoder for PublishCodec {
         let dup_flag = (publish_flags & 0b00000001) != 0;
         let retain = (publish_flags & 0b00000010) != 0;
         let temp_buf = publish_flags << 5;
-        let qos_val = temp_buf >> 6;
+        let qos = temp_buf >> 6;
+
+        let rl_u;
+        if let Some(rl) = get_remaining_length(buf)? {
+            // Ensure the entire packet is in buffer
+            if buf.len() < (1 + rl) as usize {
+                return Ok(None);
+            }
+            rl_u = rl as usize;
+        } else {
+            // The entire remaining length is not in buffer
+            return Ok(None);
+        }
 
         // FIXME: modify once QoS enum is implemented
-        match qos_val {
+        match qos {
             0 => (),
             1 => (),
             2 => (),
@@ -278,16 +296,31 @@ impl Decoder for PublishCodec {
         let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
 
-        // 3.
-        let topic_bytes = &buf[..byte_len];
+        // 3.3.2.1 Topic Name
+        let topic_bytes = buf[..byte_len].to_vec();
+        buf.advance(byte_len);
         let topic = match String::from_utf8(topic_bytes.to_vec()) {
             Ok(s) => s.to_string(),
             Err(_e) => return Err(Error::new(InvalidData, "Invalid UTF-8 sequence")),
         };
 
+        // 3.3.2.2 Packet Identifier
         let packet_id = combine_bytes(buf[0], buf[1]);
+        buf.advance(2);
 
-        Ok(None)
+        // 3.3.4 Payload
+        let payload_len = rl_u - (2 + byte_len + 2);
+        let payload = buf[..payload_len].to_vec();
+        buf.advance(payload_len);
+
+        Ok(Some(PublishPacket {
+            dup_flag,
+            retain,
+            qos,
+            topic,
+            packet_id,
+            payload,
+        }))
     }
 }
 
@@ -335,17 +368,14 @@ impl Decoder for MqttCodec {
             return Err(Error::new(InvalidData, "Invalid packet type"));
         }
 
-        let remaining_length = get_remaining_length(buf)?;
-
-        match remaining_length {
+        if let Some(rl) = get_remaining_length(buf)? {
             // Ensure the entire packet is in buffer
-            Some(rl) => {
-                if buf.len() < (1 + rl) as usize {
-                    return Ok(None);
-                }
+            if buf.len() < (1 + rl) as usize {
+                return Ok(None);
             }
+        } else {
             // The entire remaining length is not in buffer
-            None => return Ok(None),
+            return Ok(None);
         }
 
         let packet = match packet_type {
@@ -439,6 +469,34 @@ mod tests {
             MqttPacket::Connack(c) => {
                 assert_eq!(c.variable_header.session_present_flag, false);
                 assert_eq!(c.variable_header.connect_return_code, 0);
+            }
+            _ => (),
+        }
+    }
+
+    #[test]
+    fn test_decode_publish_packet() {
+        let mut buf = BytesMut::from(
+            &[
+                0x32, // Fixed header (PUBLISH, QoS 1)
+                0x16, // Remaining length (22 bytes)
+                0x00, 0x04, // Topic name length (4 bytes)
+                0x74, 0x65, 0x73, 0x74, // Topic name "test"
+                0x00, 0x0A, // Packet identifier (10)
+                0x48, 0x65, 0x6C, 0x6C, 0x6F, // Payload "Hello"
+            ][..],
+        );
+
+        let mut codec = MqttCodec::new();
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+        match packet {
+            MqttPacket::Publish(p) => {
+                assert_eq!(p.dup_flag, false);
+                assert_eq!(p.qos, 1);
+                assert_eq!(p.retain, false);
+                assert_eq!(p.topic, String::from("test"));
+                assert_eq!(p.packet_id, 10);
+                //assert_eq!(p.payload, String::from("Hello"));
             }
             _ => (),
         }
