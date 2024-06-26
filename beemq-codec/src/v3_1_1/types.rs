@@ -1,8 +1,46 @@
 use bytes::{Buf, BytesMut};
 use std::io::Error;
 use std::io::ErrorKind::InvalidData;
-use std::u32;
+use std::{u32, usize};
 use tokio_util::codec::Decoder;
+
+fn get_bytes_len(msb: u8, lsb: u8) -> usize {
+    // Get the number of bytes to read from byte sequence
+    // given MSB and LSB
+    let byte_len = ((msb as usize) << 8) | (lsb as usize);
+    byte_len
+}
+
+fn get_remaining_length(buf: &mut BytesMut) -> Result<Option<u32>, Error> {
+    // 2.2.3 Remaining Length
+    let mut multiplier: u32 = 1;
+    let mut remaining_length: u32 = 0;
+    // Remaining length start at second byte
+    let mut pos = 1;
+
+    loop {
+        if pos >= buf.len() {
+            // Not enough data arrived yet to decode
+            return Ok(None);
+        }
+
+        let encoded_byte = buf[pos];
+        pos += 1;
+        remaining_length += (encoded_byte & 127) as u32 * multiplier;
+        // Multiply since is the next byte
+        multiplier *= 128;
+
+        if multiplier > 128 * 128 * 128 {
+            return Err(Error::new(InvalidData, "Malformed remaining length"));
+        }
+
+        // MSB is the continuation flag
+        if (encoded_byte & 128) == 0 {
+            break;
+        }
+    }
+    Ok(Some(remaining_length))
+}
 
 pub struct ConnectFlags {
     username_flag: bool,
@@ -36,15 +74,6 @@ pub struct ConnectPacket {
 
 pub struct ConnectCodec;
 
-impl ConnectCodec {
-    fn get_bytes_len(&mut self, msb: u8, lsb: u8) -> usize {
-        // Get the number of bytes to read from byte sequence
-        // given MSB and LSB
-        let byte_len = ((msb as usize) << 8) | (lsb as usize);
-        byte_len
-    }
-}
-
 impl Decoder for ConnectCodec {
     type Item = ConnectPacket;
     type Error = Error;
@@ -54,7 +83,7 @@ impl Decoder for ConnectCodec {
         buf.advance(2);
 
         // 3.1.2 Variable header
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
 
         // 3.1.2.1 Protocol Name
@@ -122,7 +151,7 @@ impl Decoder for ConnectCodec {
         buf.advance(2);
 
         // 3.1.3 Payload
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
         let client_id_bytes = &buf[..byte_len];
         let client_id = match String::from_utf8(client_id_bytes.to_vec()) {
@@ -131,7 +160,7 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
         let will_topic_bytes = &buf[..byte_len];
         let will_topic = match String::from_utf8(will_topic_bytes.to_vec()) {
@@ -140,12 +169,12 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
         let will_message = Some(&buf[..byte_len].to_vec()).cloned();
         buf.advance(byte_len);
 
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
         let username_bytes = &buf[..byte_len];
         let username = match String::from_utf8(username_bytes.to_vec()) {
@@ -154,7 +183,7 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = self.get_bytes_len(buf[0], buf[1]);
+        let byte_len = get_bytes_len(buf[0], buf[1]);
         buf.advance(2);
         let password_bytes = &buf[..byte_len];
         let password = match String::from_utf8(password_bytes.to_vec()) {
@@ -235,6 +264,7 @@ impl Decoder for PublishCodec {
         let temp_buf = publish_flags << 5;
         let qos_val = temp_buf >> 6;
 
+        // FIXME: modify once QoS enum is implemented
         match qos_val {
             0 => (),
             1 => (),
@@ -246,7 +276,6 @@ impl Decoder for PublishCodec {
                 ))
             }
         }
-
         // Moved on from fixed header
         buf.advance(2);
 
@@ -300,51 +329,31 @@ impl Decoder for MqttCodec {
             return Err(Error::new(InvalidData, "Invalid packet type"));
         }
 
-        // 2.2.3 Remaining Length
-        let mut multiplier: u32 = 1;
-        let mut remaining_length: u32 = 0;
-        // Remaining length start at second byte
-        let mut pos = 1;
+        let remaining_length = get_remaining_length(buf)?;
 
-        loop {
-            if pos >= buf.len() {
-                // Not enough data arrived yet to decode
-                return Ok(None);
+        match remaining_length {
+            // Ensure the entire packet is in buffer
+            Some(rl) => {
+                if buf.len() < (1 + rl) as usize {
+                    return Ok(None);
+                }
             }
-
-            let encoded_byte = buf[pos];
-            pos += 1;
-            remaining_length += (encoded_byte & 127) as u32 * multiplier;
-            // Multiply since is the next byte
-            multiplier *= 128;
-
-            if multiplier > 128 * 128 * 128 {
-                return Err(Error::new(InvalidData, "Malformed remaining length"));
-            }
-
-            // MSB is the continuation flag
-            if (encoded_byte & 128) == 0 {
-                break;
-            }
+            // The entire remaining length is not in buffer
+            None => return Ok(None),
         }
 
-        if buf.len() < (1 + remaining_length) as usize {
-            // The entire packet hasn't arrived yet
-            Ok(None)
-        } else {
-            let packet = match packet_type {
-                1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
-                2 => ConnackCodec.decode(buf)?.map(MqttPacket::Connack),
-                3 => PublishCodec.decode(buf)?.map(MqttPacket::Publish),
-                _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
-            };
+        let packet = match packet_type {
+            1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
+            2 => ConnackCodec.decode(buf)?.map(MqttPacket::Connack),
+            3 => PublishCodec.decode(buf)?.map(MqttPacket::Publish),
+            _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
+        };
 
-            let packet = match packet {
-                Some(p) => p,
-                None => return Ok(None),
-            };
-            Ok(Some(packet))
-        }
+        let packet = match packet {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        Ok(Some(packet))
     }
 }
 
