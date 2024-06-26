@@ -1,15 +1,8 @@
 use bytes::{Buf, BytesMut};
 use std::io::Error;
 use std::io::ErrorKind::InvalidData;
-use std::{u32, usize};
+use std::{u16, u32, usize};
 use tokio_util::codec::Decoder;
-
-fn get_bytes_len(msb: u8, lsb: u8) -> usize {
-    // Get the number of bytes to read from byte sequence
-    // given MSB and LSB
-    let byte_len = ((msb as usize) << 8) | (lsb as usize);
-    byte_len
-}
 
 fn get_remaining_length(buf: &mut BytesMut) -> Result<Option<u32>, Error> {
     // 2.2.3 Remaining Length
@@ -40,6 +33,10 @@ fn get_remaining_length(buf: &mut BytesMut) -> Result<Option<u32>, Error> {
         }
     }
     Ok(Some(remaining_length))
+}
+
+fn combine_bytes(msb: u8, lsb: u8) -> u16 {
+    ((msb as u16) << 8) | (lsb as u16)
 }
 
 pub struct ConnectFlags {
@@ -83,12 +80,12 @@ impl Decoder for ConnectCodec {
         buf.advance(2);
 
         // 3.1.2 Variable header
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
 
         // 3.1.2.1 Protocol Name
-        let protocl_name_bytes = &buf[..byte_len];
-        let protocol_name = match String::from_utf8(protocl_name_bytes.to_vec()) {
+        let protocol_name_bytes = &buf[..byte_len];
+        let protocol_name = match String::from_utf8(protocol_name_bytes.to_vec()) {
             Ok(s) => s.to_string(),
             Err(_e) => return Err(Error::new(InvalidData, "Invalid UTF-8 sequence")),
         };
@@ -138,10 +135,8 @@ impl Decoder for ConnectCodec {
         buf.advance(1);
 
         // 3.1.2.10 Keep Alive
-        let keep_alive_msb = buf[0];
-        let keep_alive_lsb = buf[1];
         // TODO: Must not exceed 18hrs 12 mins and 15 sec
-        let keep_alive = ((keep_alive_msb as u16) << 8) | (keep_alive_lsb as u16);
+        let keep_alive = combine_bytes(buf[0], buf[1]);
         let variable_header = ConnectVariable {
             protocol_name,
             protocol_level,
@@ -151,7 +146,7 @@ impl Decoder for ConnectCodec {
         buf.advance(2);
 
         // 3.1.3 Payload
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
         let client_id_bytes = &buf[..byte_len];
         let client_id = match String::from_utf8(client_id_bytes.to_vec()) {
@@ -160,7 +155,7 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
         let will_topic_bytes = &buf[..byte_len];
         let will_topic = match String::from_utf8(will_topic_bytes.to_vec()) {
@@ -169,12 +164,12 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
         let will_message = Some(&buf[..byte_len].to_vec()).cloned();
         buf.advance(byte_len);
 
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
         let username_bytes = &buf[..byte_len];
         let username = match String::from_utf8(username_bytes.to_vec()) {
@@ -183,7 +178,7 @@ impl Decoder for ConnectCodec {
         };
         buf.advance(byte_len);
 
-        let byte_len = get_bytes_len(buf[0], buf[1]);
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
         let password_bytes = &buf[..byte_len];
         let password = match String::from_utf8(password_bytes.to_vec()) {
@@ -280,6 +275,17 @@ impl Decoder for PublishCodec {
         buf.advance(2);
 
         // 3.3.2 Variable header
+        let byte_len = combine_bytes(buf[0], buf[1]) as usize;
+        buf.advance(2);
+
+        // 3.
+        let topic_bytes = &buf[..byte_len];
+        let topic = match String::from_utf8(topic_bytes.to_vec()) {
+            Ok(s) => s.to_string(),
+            Err(_e) => return Err(Error::new(InvalidData, "Invalid UTF-8 sequence")),
+        };
+
+        let packet_id = combine_bytes(buf[0], buf[1]);
 
         Ok(None)
     }
