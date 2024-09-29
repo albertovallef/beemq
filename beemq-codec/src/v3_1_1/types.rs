@@ -398,6 +398,27 @@ impl Decoder for PubrelCodec {
     }
 }
 
+pub struct PubcompPacket {
+    packet_id: u16,
+}
+
+pub struct PubcompCodec;
+
+impl Decoder for PubcompCodec {
+    type Item = PubcompPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // FIXME: Validate reserved bits
+        // Moved on from fixed header
+        buf.advance(2);
+
+        let packet_id = combine_bytes(buf[0], buf[1]);
+        buf.advance(2);
+        Ok(Some(PubcompPacket { packet_id }))
+    }
+}
+
 pub enum MqttPacket {
     Connect(ConnectPacket),
     Connack(ConnackPacket),
@@ -405,7 +426,7 @@ pub enum MqttPacket {
     Puback(PubackPacket),
     Pubrec(PubrecPacket),
     Pubrel(PubrelPacket),
-    //Pubcomp(PubcompPacket),
+    Pubcomp(PubcompPacket),
     //Subscribe(SubscribePacket),
     //Suback(SubackPacket),
     //Unsubscribe(UnsubscribePacket),
@@ -465,6 +486,7 @@ impl Decoder for MqttCodec {
             4 => PubackCodec.decode(buf)?.map(MqttPacket::Puback),
             5 => PubrecCodec.decode(buf)?.map(MqttPacket::Pubrec),
             6 => PubrelCodec.decode(buf)?.map(MqttPacket::Pubrel),
+            7 => PubcompCodec.decode(buf)?.map(MqttPacket::Pubcomp),
             _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
         };
 
@@ -645,6 +667,26 @@ mod tests {
                 assert_eq!(p.packet_id, 200);
             }
             _ => panic!("Expected a PUBREL packet"),
+        }
+    }
+
+    #[test]
+    fn test_decode_pubcomp_packet() {
+        let mut buf = BytesMut::new();
+        // Fixed Header
+        buf.put_u8(0x70);
+        buf.put_u8(0x02);
+
+        // Variable Header
+        buf.put_u16(100);
+
+        let mut codec = MqttCodec::new();
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+        match packet {
+            MqttPacket::Pubcomp(p) => {
+                assert_eq!(p.packet_id, 100);
+            }
+            _ => panic!("Expected a PUBCOMP packet"),
         }
     }
 }
