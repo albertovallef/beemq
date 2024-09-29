@@ -4,12 +4,15 @@ use std::io::ErrorKind::InvalidData;
 use std::{u16, u32, usize};
 use tokio_util::codec::Decoder;
 
-fn get_remaining_length(buf: &mut BytesMut) -> Result<Option<u32>, Error> {
+fn get_remaining_length(
+    buf: &mut BytesMut,
+    start_pos: usize,
+) -> Result<Option<(u32, usize)>, Error> {
     // 2.2.3 Remaining Length
     let mut multiplier: u32 = 1;
     let mut remaining_length: u32 = 0;
     // Remaining length start at second byte
-    let mut pos = 1;
+    let mut pos = start_pos;
 
     loop {
         if pos >= buf.len() {
@@ -32,7 +35,8 @@ fn get_remaining_length(buf: &mut BytesMut) -> Result<Option<u32>, Error> {
             break;
         }
     }
-    Ok(Some(remaining_length))
+    let consumed_bytes = pos - start_pos;
+    Ok(Some((remaining_length, consumed_bytes)))
 }
 
 fn combine_bytes(msb: u8, lsb: u8) -> u16 {
@@ -247,8 +251,8 @@ pub struct PublishPacket {
     retain: bool,
     qos: u8,
     topic: String,
-    packet_id: u16,
-    payload: Vec<u8>,
+    packet_id: Option<u16>,
+    payload: BytesMut,
 }
 
 pub struct PublishCodec;
@@ -259,29 +263,14 @@ impl Decoder for PublishCodec {
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         // 3.3.1 Fixed header
-        let publish_flags = buf[0];
-        let dup_flag = (publish_flags & 0b00000001) != 0;
-        let retain = (publish_flags & 0b00000010) != 0;
-        let temp_buf = publish_flags << 5;
-        let qos = temp_buf >> 6;
-
-        let rl_u;
-        if let Some(rl) = get_remaining_length(buf)? {
-            // Ensure the entire packet is in buffer
-            if buf.len() < (1 + rl) as usize {
-                return Ok(None);
-            }
-            rl_u = rl as usize;
-        } else {
-            // The entire remaining length is not in buffer
-            return Ok(None);
-        }
+        let publish_flags = buf[0] & 0b00001111; // Extract lower 4 bits
+        let dup_flag = (publish_flags & 0b00001000) != 0;
+        let retain = (publish_flags & 0b00000001) != 0;
+        let qos = (publish_flags & 0b00000110) >> 1;
 
         // FIXME: modify once QoS enum is implemented
         match qos {
-            0 => (),
-            1 => (),
-            2 => (),
+            0 | 1 | 2 => (),
             _ => {
                 return Err(Error::new(
                     InvalidData,
@@ -289,29 +278,51 @@ impl Decoder for PublishCodec {
                 ))
             }
         }
-        // Moved on from fixed header
-        buf.advance(2);
+
+        let (remaining_length, consumed_rl_bytes);
+        // Start position is byte 1 since byte 0 is the fixed header
+        if let Some((rl, consumed)) = get_remaining_length(buf, 1)? {
+            remaining_length = rl;
+            consumed_rl_bytes = consumed;
+        } else {
+            // The entire remaining length is not in buffer
+            return Ok(None);
+        }
+
+        // Ensure the entire packet is in buffer
+        let total_len = 1 + consumed_rl_bytes + remaining_length as usize;
+        if buf.len() < total_len {
+            return Ok(None);
+        }
+
+        // Advance fixed header byte and remaining length bytes
+        buf.advance(1 + consumed_rl_bytes);
 
         // 3.3.2 Variable header
         let byte_len = combine_bytes(buf[0], buf[1]) as usize;
         buf.advance(2);
 
         // 3.3.2.1 Topic Name
-        let topic_bytes = buf[..byte_len].to_vec();
-        buf.advance(byte_len);
-        let topic = match String::from_utf8(topic_bytes.to_vec()) {
+        let topic_bytes = buf.split_to(byte_len); // split_to advances the buffer
+        let topic = match std::str::from_utf8(&topic_bytes) {
             Ok(s) => s.to_string(),
             Err(_e) => return Err(Error::new(InvalidData, "Invalid UTF-8 sequence")),
         };
 
         // 3.3.2.2 Packet Identifier
-        let packet_id = combine_bytes(buf[0], buf[1]);
-        buf.advance(2);
+        let packet_id = if qos > 0 {
+            let pid = combine_bytes(buf[0], buf[1]);
+            buf.advance(2);
+            Some(pid)
+        } else {
+            None
+        };
 
         // 3.3.4 Payload
-        let payload_len = rl_u - (2 + byte_len + 2);
-        let payload = buf[..payload_len].to_vec();
-        buf.advance(payload_len);
+        let variable_header_lenght = 2 + byte_len + if qos > 0 { 2 } else { 0 };
+        let payload_len = remaining_length as usize - variable_header_lenght;
+
+        let payload = buf.split_to(payload_len);
 
         Ok(Some(PublishPacket {
             dup_flag,
@@ -368,13 +379,19 @@ impl Decoder for MqttCodec {
             return Err(Error::new(InvalidData, "Invalid packet type"));
         }
 
-        if let Some(rl) = get_remaining_length(buf)? {
-            // Ensure the entire packet is in buffer
-            if buf.len() < (1 + rl) as usize {
-                return Ok(None);
-            }
+        let (remaining_length, consumed_rl_bytes);
+        // Start position is byte 1 since byte 0 is the fixed header
+        if let Some((rl, consumed)) = get_remaining_length(buf, 1)? {
+            remaining_length = rl;
+            consumed_rl_bytes = consumed;
         } else {
             // The entire remaining length is not in buffer
+            return Ok(None);
+        }
+
+        // Ensure the entire packet is in buffer
+        let total_len = 1 + consumed_rl_bytes + remaining_length as usize;
+        if buf.len() < total_len {
             return Ok(None);
         }
 
@@ -479,7 +496,7 @@ mod tests {
         let mut buf = BytesMut::from(
             &[
                 0x32, // Fixed header (PUBLISH, QoS 1)
-                0x16, // Remaining length (22 bytes)
+                0x0D, // Corrected Remaining length (13 bytes)
                 0x00, 0x04, // Topic name length (4 bytes)
                 0x74, 0x65, 0x73, 0x74, // Topic name "test"
                 0x00, 0x0A, // Packet identifier (10)
@@ -495,10 +512,10 @@ mod tests {
                 assert_eq!(p.qos, 1);
                 assert_eq!(p.retain, false);
                 assert_eq!(p.topic, String::from("test"));
-                assert_eq!(p.packet_id, 10);
-                //assert_eq!(p.payload, String::from("Hello"));
+                assert_eq!(p.packet_id, Some(10));
+                assert_eq!(p.payload, b"Hello".to_vec());
             }
-            _ => (),
+            _ => panic!("Expected a PUBLISH packet"),
         }
     }
 }
