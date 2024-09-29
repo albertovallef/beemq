@@ -335,12 +335,32 @@ impl Decoder for PublishCodec {
     }
 }
 
+pub struct PubrecPacket {
+    packet_id: u16,
+}
+
+pub struct PubrecCodec;
+
+impl Decoder for PubrecCodec {
+    type Item = PubrecPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Moved on from fixed header
+        buf.advance(2);
+
+        let packet_id = combine_bytes(buf[0], buf[1]);
+        buf.advance(2);
+        Ok(Some(PubrecPacket { packet_id }))
+    }
+}
+
 pub enum MqttPacket {
     Connect(ConnectPacket),
     Connack(ConnackPacket),
     Publish(PublishPacket),
     //Puback(PubackPacket),
-    //Pubrec(PubrecPacket),
+    Pubrec(PubrecPacket),
     //Pubrel(PubrelPacket),
     //Pubcomp(PubcompPacket),
     //Subscribe(SubscribePacket),
@@ -399,6 +419,7 @@ impl Decoder for MqttCodec {
             1 => ConnectCodec.decode(buf)?.map(MqttPacket::Connect),
             2 => ConnackCodec.decode(buf)?.map(MqttPacket::Connack),
             3 => PublishCodec.decode(buf)?.map(MqttPacket::Publish),
+            5 => PubrecCodec.decode(buf)?.map(MqttPacket::Pubrec),
             _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
         };
 
@@ -413,7 +434,7 @@ impl Decoder for MqttCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
+    use bytes::{BufMut, BytesMut};
 
     #[test]
     fn test_decode_connect_packet() {
@@ -516,6 +537,27 @@ mod tests {
                 assert_eq!(p.payload, b"Hello".to_vec());
             }
             _ => panic!("Expected a PUBLISH packet"),
+        }
+    }
+
+    #[test]
+    fn test_decode_pubrec_packet() {
+        // Construct a buffer representing a PUBREC packet
+        let mut buf = BytesMut::new();
+        // Fixed Header
+        buf.put_u8(0x50); // Packet type (5 for PUBREC)
+        buf.put_u8(0x02); // Remaining Length is 2 (for the Packet Identifier)
+
+        // Variable Header
+        buf.put_u16(10); // Packet identifier (e.g, 10)
+
+        let mut codec = MqttCodec::new();
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+        match packet {
+            MqttPacket::Pubrec(p) => {
+                assert_eq!(p.packet_id, 10);
+            }
+            _ => panic!("Expected a PUBREC packet"),
         }
     }
 }
