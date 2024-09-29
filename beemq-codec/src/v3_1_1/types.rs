@@ -346,6 +346,7 @@ impl Decoder for PubackCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // FIXME: Validate reserved bits
         // Moved on from fixed header
         buf.advance(2);
 
@@ -366,6 +367,7 @@ impl Decoder for PubrecCodec {
     type Error = Error;
 
     fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // FIXME: Validate reserved bits
         // Moved on from fixed header
         buf.advance(2);
 
@@ -375,13 +377,34 @@ impl Decoder for PubrecCodec {
     }
 }
 
+pub struct PubrelPacket {
+    packet_id: u16,
+}
+
+pub struct PubrelCodec;
+
+impl Decoder for PubrelCodec {
+    type Item = PubrelPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // FIXME: Validate reserved bits
+        // Moved on from fixed header
+        buf.advance(2);
+
+        let packet_id = combine_bytes(buf[0], buf[1]);
+        buf.advance(2);
+        Ok(Some(PubrelPacket { packet_id }))
+    }
+}
+
 pub enum MqttPacket {
     Connect(ConnectPacket),
     Connack(ConnackPacket),
     Publish(PublishPacket),
     Puback(PubackPacket),
     Pubrec(PubrecPacket),
-    //Pubrel(PubrelPacket),
+    Pubrel(PubrelPacket),
     //Pubcomp(PubcompPacket),
     //Subscribe(SubscribePacket),
     //Suback(SubackPacket),
@@ -441,6 +464,7 @@ impl Decoder for MqttCodec {
             3 => PublishCodec.decode(buf)?.map(MqttPacket::Publish),
             4 => PubackCodec.decode(buf)?.map(MqttPacket::Puback),
             5 => PubrecCodec.decode(buf)?.map(MqttPacket::Pubrec),
+            6 => PubrelCodec.decode(buf)?.map(MqttPacket::Pubrel),
             _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
         };
 
@@ -600,6 +624,27 @@ mod tests {
                 assert_eq!(p.packet_id, 10);
             }
             _ => panic!("Expected a PUBREC packet"),
+        }
+    }
+
+    #[test]
+    fn test_decode_pubrel_packet() {
+        // Construct a buffer representing a PUBREL packet
+        let mut buf = BytesMut::new();
+        // Fixed Header
+        buf.put_u8(0x60); // Packet type (6 for PUBREL)
+        buf.put_u8(0x02); // Remaining Length is 2 (for the Packet Identifier)
+
+        // Variable Header
+        buf.put_u16(200); // Packet identifier (e.g, 200)
+
+        let mut codec = MqttCodec::new();
+        let packet = codec.decode(&mut buf).unwrap().unwrap();
+        match packet {
+            MqttPacket::Pubrel(p) => {
+                assert_eq!(p.packet_id, 200);
+            }
+            _ => panic!("Expected a PUBREL packet"),
         }
     }
 }
