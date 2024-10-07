@@ -763,6 +763,24 @@ impl Decoder for PingrespCodec {
     }
 }
 
+pub struct DisconnectPacket;
+
+pub struct DisconnectCodec;
+
+impl Decoder for DisconnectCodec {
+    type Item = DisconnectPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // 3.14.1 Fixed header (no remaining length value)
+        // TODO: Validate flags and remainin length to be zero
+        // 3.14.2 Variable header (no variable header)
+        // 3.14.3 Payload (no payload)
+        buf.advance(2);
+        Ok(Some(DisconnectPacket))
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SubscribeReturnCode {
     Success(QoSLevel),
@@ -790,7 +808,7 @@ pub enum MqttPacket {
     Unsuback(UnsubackPacket),
     Pingreq(PingreqPacket),
     Pingresp(PingrespPacket),
-    //Disconnect(DisconnectPacket),
+    Disconnect(DisconnectPacket),
 }
 
 pub struct MqttCodec;
@@ -851,6 +869,7 @@ impl Decoder for MqttCodec {
             11 => UnsubackCodec.decode(buf)?.map(MqttPacket::Unsuback),
             12 => PingreqCodec.decode(buf)?.map(MqttPacket::Pingreq),
             13 => PingrespCodec.decode(buf)?.map(MqttPacket::Pingresp),
+            14 => DisconnectCodec.decode(buf)?.map(MqttPacket::Disconnect),
             _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
         };
 
@@ -1280,6 +1299,33 @@ mod tests {
             Ok(Some(_)) => panic!("Expected PINGRESP packet"),
             Ok(None) => panic!("Incomplete packet"),
             Err(e) => panic!("Error decoding PINGRESP packet: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_decode_disconnect_packet() {
+        // Construct a DISCONNECT packet
+        let mut buf = BytesMut::new();
+
+        // Fixed Header
+        buf.put_u8(0xE0); // Packet Type (14) << 4 | Flags (0x00)
+
+        // Remaining Length
+        buf.put_u8(0x00); // Remaining Length (0 bytes)
+
+        // Initialize the decoder
+        let mut codec = MqttCodec::new();
+
+        // Decode the packet
+        let result = codec.decode(&mut buf);
+
+        match result {
+            Ok(Some(MqttPacket::Disconnect(_packet))) => {
+                // Successfully decoded DISCONNECT packet
+            }
+            Ok(Some(_)) => panic!("Expected DISCONNECT packet"),
+            Ok(None) => panic!("Incomplete packet"),
+            Err(e) => panic!("Error decoding DISCONNECT packet: {:?}", e),
         }
     }
 }
