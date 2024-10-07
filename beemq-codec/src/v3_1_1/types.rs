@@ -727,6 +727,24 @@ impl Decoder for UnsubackCodec {
     }
 }
 
+pub struct PingreqPacket;
+
+pub struct PingreqCodec;
+
+impl Decoder for PingreqCodec {
+    type Item = PingreqPacket;
+    type Error = Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // 3.12.1 Fixed header (no remaining length value)
+        // TODO: Validate flags and remainin length to be zero
+        // 3.12.2 Variable header (no variable header)
+        // 3.12.3 Payload (no payload)
+        buf.advance(2);
+        Ok(Some(PingreqPacket))
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SubscribeReturnCode {
     Success(QoSLevel),
@@ -752,7 +770,7 @@ pub enum MqttPacket {
     Suback(SubackPacket),
     Unsubscribe(UnsubscribePacket),
     Unsuback(UnsubackPacket),
-    //Pingreq(PingreqPacket),
+    Pingreq(PingreqPacket),
     //Pingresp(PingrespPacket),
     //Disconnect(DisconnectPacket),
 }
@@ -813,6 +831,7 @@ impl Decoder for MqttCodec {
             9 => SubackCodec.decode(buf)?.map(MqttPacket::Suback),
             10 => UnsubscribeCodec.decode(buf)?.map(MqttPacket::Unsubscribe),
             11 => UnsubackCodec.decode(buf)?.map(MqttPacket::Unsuback),
+            12 => PingreqCodec.decode(buf)?.map(MqttPacket::Pingreq),
             _ => return Err(Error::new(InvalidData, "Malformed remaining length")),
         };
 
@@ -1188,6 +1207,33 @@ mod tests {
             Ok(Some(_)) => panic!("Expected UNSUBACK packet"),
             Ok(None) => panic!("Incomplete packet"),
             Err(e) => panic!("Error decoding UNSUBACK packet: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_decode_pingreq_packet() {
+        // Construct a PINGREQ packet
+        let mut buf = BytesMut::new();
+
+        // Fixed Header
+        buf.put_u8(0xC0); // Packet Type (12) << 4 | Flags (0x00)
+
+        // Remaining Length
+        buf.put_u8(0x00); // Remaining Length (0 bytes)
+
+        // Initialize the decoder
+        let mut codec = MqttCodec::new();
+
+        // Decode the packet
+        let result = codec.decode(&mut buf);
+
+        match result {
+            Ok(Some(MqttPacket::Pingreq(_packet))) => {
+                // Successfully decoded PINGREQ packet
+            }
+            Ok(Some(_)) => panic!("Expected PINGREQ packet"),
+            Ok(None) => panic!("Incomplete packet"),
+            Err(e) => panic!("Error decoding PINGREQ packet: {:?}", e),
         }
     }
 }
