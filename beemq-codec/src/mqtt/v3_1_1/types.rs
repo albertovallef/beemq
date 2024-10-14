@@ -1,0 +1,16 @@
+pub enum MqttPacket {
+    Connect(ConnectPacket),
+    Connack(ConnackPacket),
+    Publish(PublishPacket),
+    Puback(PubackPacket),
+    Pubrec(PubrecPacket),
+    Pubrel(PubrelPacket),
+    Pubcomp(PubcompPacket),
+    Subscribe(SubscribePacket),
+    Suback(SubackPacket),
+    Unsubscribe(UnsubscribePacket),
+    Unsuback(UnsubackPacket),
+    Pingreq(PingreqPacket),
+    Pingresp(PingrespPacket),
+    Disconnect(DisconnectPacket),
+}
